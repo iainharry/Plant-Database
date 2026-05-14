@@ -1,317 +1,176 @@
 // ═══════════════════════════════════════════════════════════════════
-// PlantDB — Google Apps Script Backend
+// PlantDB — Google Apps Script Backend  v3
 // Deploy as: Web App → Execute as Me → Anyone can access
+//
+// SECURITY: Set a shared secret in Script Properties:
+//   Project Settings → Script Properties → Add: key=PLANTDB_TOKEN, value=<your-secret>
+// Then set the same value as PLANTDB_TOKEN in the frontend sync config.
 // ═══════════════════════════════════════════════════════════════════
+const SHEET_NAME   = 'Plants';
+const META_SHEET   = 'Meta';
 
-const SHEET_NAME     = 'Plants';
-const META_SHEET     = 'Meta';
-const PHOTOS_SHEET   = 'Photos';
-const VERSION        = 1;
-
-// ── Entry point ──────────────────────────────────────────────────────
-function doGet(e) {
-  return handleRequest(e);
-}
-function doPost(e) {
-  return handleRequest(e);
-}
-
-function handleRequest(e) {
-  // CORS headers so the PWA can call from any origin
-  const headers = {
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type',
-    'Content-Type': 'application/json'
-  };
-
-  try {
-    const params = e.parameter || {};
-    const action = params.action || (e.postData ? JSON.parse(e.postData.contents).action : 'ping');
-    let result;
-
-    switch (action) {
-      case 'ping':        result = { ok: true, version: VERSION, ts: Date.now() }; break;
-      case 'getAll':      result = getAll(); break;
-      case 'savePlant':   result = savePlant(JSON.parse(e.postData.contents)); break;
-      case 'deletePlant': result = deletePlant(JSON.parse(e.postData.contents)); break;
-      case 'getMeta':     result = getMeta(); break;
-      case 'saveMeta':    result = saveMeta(JSON.parse(e.postData.contents)); break;
-      case 'getPhoto':    result = getPhoto(params.plantId, params.photoId); break;
-      case 'savePhoto':   result = savePhoto(JSON.parse(e.postData.contents)); break;
-      case 'deletePhoto': result = deletePhoto(JSON.parse(e.postData.contents)); break;
-      case 'replaceAll':  result = replaceAll(JSON.parse(e.postData.contents)); break;
-      default:            result = { error: 'Unknown action: ' + action };
-    }
-
-    return ContentService
-      .createTextOutput(JSON.stringify(result))
-      .setMimeType(ContentService.MimeType.JSON);
-
-  } catch (err) {
-    return ContentService
-      .createTextOutput(JSON.stringify({ error: err.toString(), stack: err.stack }))
-      .setMimeType(ContentService.MimeType.JSON);
-  }
-}
-
-// ── Sheet helpers ────────────────────────────────────────────────────
-function getOrCreateSheet(name, headers) {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  let sheet = ss.getSheetByName(name);
-  if (!sheet) {
-    sheet = ss.insertSheet(name);
-    if (headers) sheet.appendRow(headers);
-  }
-  return sheet;
-}
-
-// Column order for the Plants sheet
 const PLANT_COLS = [
   'id','no','family','genus','species','subsp','variety','cultivar','common',
-  'h','w','type1','type2','type3','le',
-  'climate','aspect','soil','constraints',
+  'h','w','type1','type2','type3','le','climate','aspect','soil','constraints',
   'desc','cultural','refs',
   'leafType','flowerColour','floweringSeason','fruitDesc','fruitingPeriod','nativeRegion',
   'uses','wildlife','ecoRole','indigenousNotes',
   'toxic','toxicNotes','allergen','allergenNotes','weedStatus','healthStatus',
-  'gps','mapRef',
-  'tags','notes','collection',
-  'dateAdded','dateModified'
+  'gps','mapRef','tags','notes','collection','log','dateAdded','dateModified'
 ];
 
-function getPlantsSheet() {
-  return getOrCreateSheet(SHEET_NAME, PLANT_COLS);
+function doGet(e)  { return handleRequest(e); }
+function doPost(e) { return handleRequest(e); }
+
+function handleRequest(e) {
+  try {
+    // ── Token check ──────────────────────────────────────────────────
+    const expectedToken = PropertiesService.getScriptProperties().getProperty('PLANTDB_TOKEN');
+    if(expectedToken) {
+      const params  = e.parameter || {};
+      const body    = e.postData  ? tryParse(e.postData.contents) : {};
+      const reqToken = params.token || body.token || '';
+      if(reqToken !== expectedToken) {
+        return jsonOut({error:'Unauthorized'});
+      }
+    }
+
+    const params = e.parameter || {};
+    const action = params.action || (e.postData ? tryParse(e.postData.contents).action : 'ping');
+    let result;
+    switch(action) {
+      case 'ping':        result = {ok:true,version:3,ts:Date.now()}; break;
+      case 'getAll':      result = getAll(); break;
+      case 'savePlant':   result = savePlant(tryParse(e.postData.contents)); break;
+      case 'deletePlant': result = deletePlant(tryParse(e.postData.contents)); break;
+      case 'getMeta':     result = getMeta(); break;
+      case 'saveMeta':    result = saveMeta(tryParse(e.postData.contents)); break;
+      case 'replaceAll':  result = replaceAll(tryParse(e.postData.contents)); break;
+      default:            result = {error:'Unknown action'};
+    }
+    return jsonOut(result);
+  } catch(err) {
+    // Log full error server-side; return only a generic message to client.
+    console.error(err);
+    return jsonOut({error:'Internal server error'});
+  }
 }
 
-function getMetaSheet() {
-  return getOrCreateSheet(META_SHEET, ['key','value']);
+function jsonOut(obj) {
+  return ContentService.createTextOutput(JSON.stringify(obj))
+    .setMimeType(ContentService.MimeType.JSON);
 }
 
-function getPhotosSheet() {
-  return getOrCreateSheet(PHOTOS_SHEET, ['plantId','photoId','dataUrl','editedUrl','caption','rot','scale','panX','panY','flipH','flipV','sortOrder']);
+function tryParse(str) {
+  try { return JSON.parse(str); } catch(e) { return {}; }
 }
 
-// ── GET ALL plants (photos loaded separately on demand) ──────────────
+function getOrCreate(name, headers) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sh = ss.getSheetByName(name);
+  if(!sh) { sh = ss.insertSheet(name); if(headers) sh.appendRow(headers); }
+  return sh;
+}
+
 function getAll() {
-  const sheet = getPlantsSheet();
-  const data  = sheet.getDataRange().getValues();
-  if (data.length <= 1) return { plants: [], nextId: 1, nextPid: 1 };
-
+  const sh = getOrCreate(SHEET_NAME, PLANT_COLS);
+  const data = sh.getDataRange().getValues();
+  if(data.length <= 1) return {plants:[],nextId:1,nextPid:1};
   const headers = data[0];
-  const plants  = data.slice(1).map(row => {
+  const plants = data.slice(1).map(row => {
     const p = {};
-    headers.forEach((h, i) => { p[h] = row[i] === '' ? '' : row[i]; });
-    // Parse stored types back
+    headers.forEach((h,i) => { p[h] = row[i]===''?'':row[i]; });
     p.tags = p.tags ? String(p.tags).split('|').filter(Boolean) : [];
-    p.photos = []; // photos loaded separately to keep response fast
+    try { p.log = p.log ? JSON.parse(p.log) : []; } catch(e) { p.log = []; }
+    p.photos = [];
     return p;
   });
-
   const meta = getMeta();
-  return { plants, nextId: meta.nextId || plants.length + 1, nextPid: meta.nextPid || 1 };
+  return {plants, nextId:meta.nextId||plants.length+1, nextPid:meta.nextPid||1};
 }
 
-// ── SAVE single plant (upsert) ───────────────────────────────────────
 function savePlant(body) {
-  const p     = body.plant;
-  const sheet = getPlantsSheet();
-  const data  = sheet.getDataRange().getValues();
+  const p = body.plant;
+  if(!p || (!p.id && !p.common && !p.genus)) return {error:'Invalid plant data'};
+  const sh = getOrCreate(SHEET_NAME, PLANT_COLS);
+  const data = sh.getDataRange().getValues();
   const headers = data[0];
-
-  // Build row array in column order
   const row = PLANT_COLS.map(col => {
-    if (col === 'tags')   return (p.tags || []).join('|');
-    if (col === 'photos') return ''; // photos stored separately
-    const v = p[col];
-    return v === undefined ? '' : v;
+    if(col==='tags')   return (p.tags||[]).join('|');
+    if(col==='log')    return JSON.stringify(p.log||[]);
+    if(col==='photos') return '';
+    return p[col]===undefined?'':p[col];
   });
-
-  // Find existing row by id
   const idCol = headers.indexOf('id');
   let found = -1;
-  for (let i = 1; i < data.length; i++) {
-    if (String(data[i][idCol]) === String(p.id)) { found = i; break; }
-  }
-
-  if (found >= 0) {
-    sheet.getRange(found + 1, 1, 1, row.length).setValues([row]);
-  } else {
-    sheet.appendRow(row);
-  }
-
-  return { ok: true, id: p.id };
+  for(let i=1; i<data.length; i++) { if(String(data[i][idCol])===String(p.id)){found=i;break;} }
+  if(found>=0) sh.getRange(found+1,1,1,row.length).setValues([row]);
+  else sh.appendRow(row);
+  return {ok:true, id:p.id};
 }
 
-// ── DELETE single plant ──────────────────────────────────────────────
 function deletePlant(body) {
-  const sheet = getPlantsSheet();
-  const data  = sheet.getDataRange().getValues();
+  const sh = getOrCreate(SHEET_NAME, PLANT_COLS);
+  const data = sh.getDataRange().getValues();
   const idCol = data[0].indexOf('id');
-
-  for (let i = data.length - 1; i >= 1; i--) {
-    if (String(data[i][idCol]) === String(body.id)) {
-      sheet.deleteRow(i + 1);
-      // Also delete all photos for this plant
-      deletePhotosForPlant(body.id);
-      return { ok: true };
-    }
+  for(let i=data.length-1; i>=1; i--) {
+    if(String(data[i][idCol])===String(body.id)) { sh.deleteRow(i+1); return {ok:true}; }
   }
-  return { ok: false, error: 'Plant not found' };
+  return {ok:false, error:'Not found'};
 }
 
-// ── REPLACE ALL plants (import) ──────────────────────────────────────
+// Atomic replaceAll: write all rows in a single setValues() call so a
+// mid-execution timeout cannot leave the sheet in a partially-written state.
 function replaceAll(body) {
-  const sheet = getPlantsSheet();
-  // Clear existing data except header
-  const lastRow = sheet.getLastRow();
-  if (lastRow > 1) sheet.deleteRows(2, lastRow - 1);
-
-  // Clear photos too
-  const ps = getPhotosSheet();
-  const plr = ps.getLastRow();
-  if (plr > 1) ps.deleteRows(2, plr - 1);
-
-  // Re-insert all
-  (body.plants || []).forEach(p => savePlant({ plant: p }));
-  // Re-insert all photos
-  (body.allPhotos || []).forEach(ph => savePhoto({ photo: ph }));
-
-  saveMeta({ nextId: body.nextId, nextPid: body.nextPid });
-  return { ok: true, count: (body.plants || []).length };
+  const sh = getOrCreate(SHEET_NAME, PLANT_COLS);
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const lr = sh.getLastRow();
+    if(lr > 1) sh.deleteRows(2, lr - 1);
+    const plants = body.plants || [];
+    if(plants.length > 0) {
+      const rows = plants.map(p => PLANT_COLS.map(col => {
+        if(col==='tags')   return (p.tags||[]).join('|');
+        if(col==='log')    return JSON.stringify(p.log||[]);
+        if(col==='photos') return '';
+        return p[col]===undefined?'':p[col];
+      }));
+      sh.getRange(2, 1, rows.length, PLANT_COLS.length).setValues(rows);
+    }
+    saveMeta({
+      nextId:body.nextId, nextPid:body.nextPid,
+      collections:body.collections, savedSearches:body.savedSearches
+    });
+    return {ok:true, count:plants.length};
+  } finally {
+    lock.releaseLock();
+  }
 }
 
-// ── META (nextId, nextPid, collections, savedSearches) ───────────────
 function getMeta() {
-  const sheet = getMetaSheet();
-  const data  = sheet.getDataRange().getValues();
-  const meta  = {};
-  data.slice(1).forEach(row => {
-    try { meta[row[0]] = JSON.parse(row[1]); } catch(e) { meta[row[0]] = row[1]; }
-  });
+  const sh = getOrCreate(META_SHEET, ['key','value']);
+  const data = sh.getDataRange().getValues();
+  const meta = {};
+  data.slice(1).forEach(row => { try{meta[row[0]]=JSON.parse(row[1]);}catch(e){meta[row[0]]=row[1];} });
   return meta;
 }
 
 function saveMeta(body) {
-  const sheet = getMetaSheet();
-  const data  = sheet.getDataRange().getValues();
-  const keys  = data.slice(1).map(r => r[0]);
-
-  Object.entries(body).forEach(([key, val]) => {
-    const stored = typeof val === 'object' ? JSON.stringify(val) : String(val);
+  const sh = getOrCreate(META_SHEET, ['key','value']);
+  const data = sh.getDataRange().getValues();
+  const keys = data.slice(1).map(r=>r[0]);
+  Object.entries(body).forEach(([key,val]) => {
+    const stored = typeof val==='object' ? JSON.stringify(val) : String(val);
     const idx = keys.indexOf(key);
-    if (idx >= 0) {
-      sheet.getRange(idx + 2, 2).setValue(stored);
-    } else {
-      sheet.appendRow([key, stored]);
-      keys.push(key);
-    }
+    if(idx>=0) sh.getRange(idx+2,2).setValue(stored);
+    else { sh.appendRow([key,stored]); keys.push(key); }
   });
-
-  return { ok: true };
+  return {ok:true};
 }
 
-// ── PHOTOS (stored as base64 in the Photos sheet) ────────────────────
-function getPhoto(plantId, photoId) {
-  const sheet = getPhotosSheet();
-  const data  = sheet.getDataRange().getValues();
-  const headers = data[0];
-  const pidCol = headers.indexOf('plantId');
-  const idCol  = headers.indexOf('photoId');
-
-  for (let i = 1; i < data.length; i++) {
-    if (String(data[i][pidCol]) === String(plantId) &&
-        String(data[i][idCol])  === String(photoId)) {
-      const ph = {};
-      headers.forEach((h, j) => ph[h] = data[i][j]);
-      return { photo: ph };
-    }
-  }
-  return { photo: null };
-}
-
-function getPhotosForPlant(plantId) {
-  const sheet = getPhotosSheet();
-  const data  = sheet.getDataRange().getValues();
-  if (data.length <= 1) return [];
-  const headers = data[0];
-  const pidCol  = headers.indexOf('plantId');
-  const sortCol = headers.indexOf('sortOrder');
-
-  return data.slice(1)
-    .filter(row => String(row[pidCol]) === String(plantId))
-    .sort((a, b) => (a[sortCol] || 0) - (b[sortCol] || 0))
-    .map(row => {
-      const ph = {};
-      headers.forEach((h, j) => {
-        if (h === 'flipH' || h === 'flipV') ph[h] = row[j] === true || row[j] === 'TRUE';
-        else ph[h] = row[j];
-      });
-      return ph;
-    });
-}
-
-function savePhoto(body) {
-  const ph    = body.photo;
-  const sheet = getPhotosSheet();
-  const data  = sheet.getDataRange().getValues();
-  const headers = data[0];
-  const pidCol  = headers.indexOf('plantId');
-  const idCol   = headers.indexOf('photoId');
-
-  const row = headers.map(h => {
-    if (h === 'flipH' || h === 'flipV') return ph[h] ? 'TRUE' : 'FALSE';
-    return ph[h] === undefined ? '' : ph[h];
-  });
-
-  let found = -1;
-  for (let i = 1; i < data.length; i++) {
-    if (String(data[i][pidCol]) === String(ph.plantId) &&
-        String(data[i][idCol])  === String(ph.photoId)) {
-      found = i; break;
-    }
-  }
-
-  if (found >= 0) {
-    sheet.getRange(found + 1, 1, 1, row.length).setValues([row]);
-  } else {
-    sheet.appendRow(row);
-  }
-  return { ok: true };
-}
-
-function deletePhoto(body) {
-  const sheet = getPhotosSheet();
-  const data  = sheet.getDataRange().getValues();
-  const headers = data[0];
-  const pidCol  = headers.indexOf('plantId');
-  const idCol   = headers.indexOf('photoId');
-
-  for (let i = data.length - 1; i >= 1; i--) {
-    if (String(data[i][pidCol]) === String(body.plantId) &&
-        String(data[i][idCol])  === String(body.photoId)) {
-      sheet.deleteRow(i + 1);
-      return { ok: true };
-    }
-  }
-  return { ok: false };
-}
-
-function deletePhotosForPlant(plantId) {
-  const sheet = getPhotosSheet();
-  const data  = sheet.getDataRange().getValues();
-  const headers = data[0];
-  const pidCol  = headers.indexOf('plantId');
-
-  for (let i = data.length - 1; i >= 1; i--) {
-    if (String(data[i][pidCol]) === String(plantId)) sheet.deleteRow(i + 1);
-  }
-}
-
-// ── Utility: called manually to set up the spreadsheet ───────────────
 function setupSpreadsheet() {
-  getPlantsSheet();
-  getMetaSheet();
-  getPhotosSheet();
-  SpreadsheetApp.getActiveSpreadsheet().toast('PlantDB sheets ready!', 'Setup Complete', 5);
+  getOrCreate(SHEET_NAME, PLANT_COLS);
+  getOrCreate(META_SHEET, ['key','value']);
+  SpreadsheetApp.getActiveSpreadsheet().toast('PlantDB sheets ready!','Setup Complete',5);
 }
