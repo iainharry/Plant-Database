@@ -1,7 +1,8 @@
-// PlantDB Service Worker v2
-const CACHE = 'plantdb-v2';
+// PlantDB Service Worker v3
+const CACHE = 'plantdb-v3';
 const ASSETS = ['./', './index.html', './manifest.json',
-  'https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;1,400&family=DM+Sans:wght@300;400;500&display=swap'];
+  'https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;1,400&family=DM+Sans:wght@300;400;500&display=swap',
+  'https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js'];
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS)));
@@ -16,7 +17,7 @@ self.addEventListener('fetch', e => {
   if(url.hostname==='script.google.com'||url.hostname==='script.googleusercontent.com'){
     e.respondWith(fetch(e.request)); return;
   }
-  if(url.hostname.includes('googleapis.com')||url.hostname.includes('gstatic.com')){
+  if(url.hostname.includes('googleapis.com')||url.hostname.includes('gstatic.com')||url.hostname.includes('cdnjs.cloudflare.com')){
     e.respondWith(fetch(e.request).then(r=>{const c=r.clone();caches.open(CACHE).then(ca=>ca.put(e.request,c));return r;}).catch(()=>caches.match(e.request)));
     return;
   }
