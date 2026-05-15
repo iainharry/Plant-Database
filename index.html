@@ -1,4 +1,3 @@
-<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -782,6 +781,7 @@ nav{background:var(--nav-bg,var(--moss));display:flex;align-items:center;positio
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
         Export
       </button>
+      <button class="btn-outline" id="btnSync" title="Sync with Google Sheets">&#x21c5; Sync</button>
       <button class="btn-primary" id="btnAddPlant">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12h14"/></svg>
         Add Plant
@@ -3299,6 +3299,134 @@ function openThemePicker() {
 // boot
 init();
 if(new URLSearchParams(location.search).get('action')==='add') setTimeout(openAddForm,200);
+
+// ── Google Sheets Sync ─────────────────────────────────────────────
+const SYNC_KEY = 'plantdb_sync_config';
+const SYNC_URL_DEFAULT = 'https://script.google.com/macros/s/AKfycbwPFMVbKKphJmlnIih-RNXbvVGdUoqjpQVjTI4zewVwawhdRf9ip3ekLvu_B9tD4CCl/exec';
+
+function syncLoadConfig() {
+  try {
+    const cfg = JSON.parse(localStorage.getItem(SYNC_KEY) || '{}');
+    if (!cfg.url) cfg.url = SYNC_URL_DEFAULT;
+    return cfg;
+  } catch(e) { return { url: SYNC_URL_DEFAULT }; }
+}
+function syncSaveConfig(cfg) {
+  localStorage.setItem(SYNC_KEY, JSON.stringify(cfg));
+}
+
+function openSyncModal() {
+  const cfg = syncLoadConfig();
+  document.getElementById('syncUrl').value   = cfg.url   || '';
+  document.getElementById('syncToken').value = cfg.token || '';
+  document.getElementById('syncStatus').textContent = '';
+  document.getElementById('syncOverlay').classList.add('open');
+}
+
+function syncGetConfig() {
+  const url   = document.getElementById('syncUrl').value.trim();
+  const token = document.getElementById('syncToken').value.trim();
+  if (url) syncSaveConfig({ url, token });
+  return { url, token };
+}
+
+function syncSetStatus(msg, ok) {
+  const el = document.getElementById('syncStatus');
+  el.textContent = msg;
+  el.style.color = ok === false ? '#c0392b' : ok === true ? '#27ae60' : '#666';
+}
+
+async function syncRequest(params, body) {
+  const { url, token } = syncGetConfig();
+  if (!url) { syncSetStatus('No URL configured.', false); return null; }
+  try {
+    const qs = new URLSearchParams({ ...params, ...(token ? { token } : {}) });
+    const opts = body
+      ? { method: 'POST', body: JSON.stringify({ ...body, ...(token ? { token } : {}) }), headers: { 'Content-Type': 'application/json' } }
+      : { method: 'GET' };
+    const res = await fetch(`${url}?${qs}`, opts);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json();
+  } catch(err) {
+    syncSetStatus('Error: ' + err.message, false);
+    return null;
+  }
+}
+
+async function syncTest() {
+  syncSetStatus('Testing…');
+  const data = await syncRequest({ action: 'ping' });
+  if (data) syncSetStatus(data.ok ? `Connected — backend v${data.version}` : ('Error: ' + (data.error || 'unknown')), !!data.ok);
+}
+
+async function syncPush() {
+  syncSetStatus('Pushing…');
+  // Read current app state — storage uses key 'db' for the plants array
+  let appData;
+  try { appData = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}'); } catch(e) { appData = {}; }
+  const plants        = appData.db            || DB || [];
+  const nId           = appData.nextId        || nextId || 1;
+  const nPid          = appData.nextPid       || nextPid || 1;
+  const cols          = appData.collections   || collections || [];
+  const searches      = appData.savedSearches || savedSearches || [];
+  const data = await syncRequest({ action: 'replaceAll' }, { plants, nextId: nId, nextPid: nPid, collections: cols, savedSearches: searches });
+  if (data) syncSetStatus(data.ok ? `Pushed ${plants.length} plants to Google Sheets.` : ('Error: ' + (data.error || 'unknown')), !!data.ok);
+}
+
+async function syncPull() {
+  if (!confirm('Pull from Google Sheets? This will REPLACE your local data.')) return;
+  syncSetStatus('Pulling…');
+  const data = await syncRequest({ action: 'getAll' });
+  if (!data) return;
+  if (data.error) { syncSetStatus('Error: ' + data.error, false); return; }
+  // Write into localStorage using the app's storage key; storage uses 'db' for plants array
+  let appData;
+  try { appData = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}'); } catch(e) { appData = {}; }
+  appData.db = data.plants || [];
+  if (data.nextId)  appData.nextId  = data.nextId;
+  if (data.nextPid) appData.nextPid = data.nextPid;
+  if (data.collections)   appData.collections   = data.collections;
+  if (data.savedSearches) appData.savedSearches = data.savedSearches;
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(appData));
+  syncSetStatus(`Pulled ${appData.db.length} plants. Reloading…`, true);
+  setTimeout(() => location.reload(), 1200);
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const btn = document.getElementById('btnSync');
+  if (btn) btn.addEventListener('click', openSyncModal);
+  const closeBtn = document.getElementById('syncClose');
+  if (closeBtn) closeBtn.addEventListener('click', () => document.getElementById('syncOverlay').classList.remove('open'));
+  const overlay = document.getElementById('syncOverlay');
+  if (overlay) overlay.addEventListener('click', e => {
+    if (e.target === overlay || e.target.classList.contains('modal-wrap')) overlay.classList.remove('open');
+  });
+});
+// ── End Sync ───────────────────────────────────────────────────────
 </script>
+
+<div class="modal-overlay" id="syncOverlay">
+  <div class="modal-wrap">
+    <div class="modal-panel" style="max-width:480px;">
+      <div class="modal-hd">
+        <div class="modal-plant-no">Google Sheets</div>
+        <div class="modal-title" style="font-size:1.2rem;">Sync Settings</div>
+        <button class="modal-hd-close" id="syncClose">&#x2715;</button>
+      </div>
+      <div class="modal-bd" style="display:flex;flex-direction:column;gap:12px;">
+        <label style="font-size:0.85rem;font-weight:600;color:var(--text);">Apps Script Web App URL</label>
+        <input id="syncUrl" type="url" placeholder="https://script.google.com/macros/s/..." style="width:100%;padding:8px;border:1px solid #ccc;border-radius:6px;font-size:0.85rem;box-sizing:border-box;">
+        <label style="font-size:0.85rem;font-weight:600;color:var(--text);">Auth Token (optional)</label>
+        <input id="syncToken" type="password" placeholder="Leave blank if no token set" style="width:100%;padding:8px;border:1px solid #ccc;border-radius:6px;font-size:0.85rem;box-sizing:border-box;">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;">
+          <button class="btn-outline" onclick="syncTest()">Test Connection</button>
+          <button class="btn-primary" onclick="syncPush()">Push to Sheets</button>
+          <button class="btn-outline" onclick="syncPull()">Pull from Sheets</button>
+        </div>
+        <div id="syncStatus" style="font-size:0.82rem;color:#666;min-height:1.5em;"></div>
+      </div>
+    </div>
+  </div>
+</div>
 </body>
 </html>
