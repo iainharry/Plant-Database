@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Plant Living Database</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#2d4a2d">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="PlantDB">
+<link rel="apple-touch-icon" href="icon192.png">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    height: 100%;
+    background: #f5f0e8;
+    font-family: system-ui, -apple-system, 'DM Sans', sans-serif;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .splash {
+    text-align: center;
+    padding: 32px;
+  }
+  .logo {
+    width: 64px;
+    height: 64px;
+    background: #2d4a2d;
+    border-radius: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin: 0 auto 18px;
+    font-size: 32px;
+  }
+  h1 {
+    font-size: 1.3rem;
+    color: #2d4a2d;
+    font-weight: 600;
+    margin-bottom: 6px;
+  }
+  p {
+    color: #6b5d4f;
+    font-size: 0.85rem;
+  }
+  .spinner {
+    width: 32px;
+    height: 32px;
+    border: 3px solid #e8efe4;
+    border-top-color: #4a7c59;
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+    margin: 18px auto 0;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div class="splash">
+  <div class="logo">🌿</div>
+  <h1>Plant Living Database</h1>
+  <p>Loading&hellip;</p>
+  <div class="spinner"></div>
+</div>
+<script>
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('./sw.js').catch(function() {});
+  }
+  // Small delay so the splash is visible, then redirect to main app
+  setTimeout(function() {
+    window.location.replace('./plantdatabase.html');
+  }, 300);
+</script>
+</body>
+</html>
